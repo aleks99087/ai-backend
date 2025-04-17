@@ -3,7 +3,6 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
-import { assistantPrompt } from './prompts/assistant.js';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -30,6 +29,46 @@ const supabase = createClient(
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+function buildAssistantPrompt(city, days, attractionsList) {
+  return `
+Ты — AI-ассистент по путешествиям. Пользователь планирует поездку в город "${city}" на ${days} дней.
+
+Ниже список реальных достопримечательностей, доступных в базе данных:
+
+${attractionsList}
+
+Твоя задача:
+
+1. Уточни у пользователя цель поездки:
+- Он путешествует один, с друзьями, с детьми?
+- Ему важно отдохнуть, активно провести время или всё понемногу?
+- Есть ли предпочтения: природа, музеи, кафе, пляжи, парки?
+
+2. После уточнения предложи 4–6 мест из списка выше, подходящих под его стиль.
+
+3. Дождись выбора пользователя (может выбрать всё, часть, или отказаться).
+
+4. Только после согласования — предложи: "Хочешь, я соберу маршрут?"
+
+5. Если пользователь ответит "да", верни JSON в формате:
+{
+  "action": "create_trip",
+  "params": {
+    "city": "${city}",
+    "days": ${days},
+    "attractions": [
+      { "name": "Олимпийский парк" },
+      { "name": "Дендрарий" }
+    ]
+  },
+  "suggestions": ["+ Добавь пляжи", "+ Найди кафе", "+ Покажи карту маршрута"]
+}
+
+⚠️ Никогда не придумывай новые достопримечательности. Используй только список выше.
+⚠️ Никогда не добавляй ссылку — её сформирует backend.
+  `;
+}
 
 async function generateTripFromParams(user_id, params) {
   const { days = 3, city = 'Сочи', attractions = [] } = params;
@@ -111,8 +150,25 @@ app.post('/api/chat', async (req, res) => {
       )
       .slice(-10);
 
+    const lastUserMessage = historyFiltered.reverse().find(h => h.role === 'user')?.message || '';
+    const match = lastUserMessage.match(/(\d+).*дн|дня|дней.*в\s+([а-яА-Яa-zA-Z-]+)/i);
+
+    const city = match?.[2] || 'Сочи';
+    const days = parseInt(match?.[1]) || 3;
+
+    const { data: attractions } = await supabase
+      .from('attractions')
+      .select('name, description')
+      .eq('city', city)
+      .order('rating', { ascending: false })
+      .limit(10);
+
+    const attractionsList = attractions
+      ?.map((a, i) => `${i + 1}. ${a.name} — ${a.description || 'без описания'}`)
+      .join('\n') || 'Пока нет данных';
+
     const messages = [
-      { role: 'system', content: assistantPrompt },
+      { role: 'system', content: buildAssistantPrompt(city, days, attractionsList) },
       ...historyFiltered.map((h) => ({ role: h.role, content: h.message })),
     ];
 
@@ -123,8 +179,6 @@ app.post('/api/chat', async (req, res) => {
       messages,
       temperature: 0.8,
     });
-
-    console.log('🧠 Ответ GPT:', completion.choices[0].message);
 
     const rawResponse = completion.choices[0].message.content || 'Ошибка генерации';
     console.log('📦 RAW GPT response:', rawResponse);
@@ -144,17 +198,16 @@ app.post('/api/chat', async (req, res) => {
           assistantMessage = `Готово! Вот ваш маршрут: ${trip.url}`;
           suggestions = ["+ Измени маршрут", "+ Добавь отели", "+ Подскажи достопримечательности"];
           res.status(200).json({ reply: assistantMessage, suggestions, tripId: trip.id });
-          return; // <— чтобы не падали ниже
+          return;
         } else {
           assistantMessage = rawResponse.replace(jsonMatch[0], '').trim();
-        }        
+        }
       } else {
         console.warn('❌ JSON не найден в ответе GPT');
         assistantMessage = rawResponse.trim();
       }
     } catch (e) {
       console.log('❌ Не удалось распарсить JSON из ответа GPT');
-      console.log('📦 RAW GPT response:', rawResponse);
       assistantMessage = rawResponse.trim();
     }
 
@@ -171,30 +224,4 @@ app.post('/api/chat', async (req, res) => {
     console.error('AI error:', err);
     res.status(500).json({ error: 'Ошибка генерации' });
   }
-});
-
-app.get('/api/chat-history', async (req, res) => {
-  const { user_id } = req.query;
-
-  if (!user_id) {
-    return res.status(400).json({ error: 'Missing user_id' });
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from('chat_history')
-      .select('*')
-      .eq('user_id', user_id)
-      .order('created_at', { ascending: true });
-
-    if (error) throw error;
-    res.status(200).json({ messages: data });
-  } catch (err) {
-    console.error('Ошибка при получении истории чата:', err);
-    res.status(500).json({ error: 'Ошибка при получении истории чата' });
-  }
-});
-
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
 });
