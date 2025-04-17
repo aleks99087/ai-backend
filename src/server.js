@@ -1,10 +1,17 @@
 // server/server.js
 import express from 'express';
 import cors from 'cors';
-import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { assistantPrompt } from './prompts/assistant.js';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// Получаем абсолютный путь до .env
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 console.log('SUPABASE URL:', process.env.SUPABASE_URL);
 console.log('SUPABASE KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY?.slice(0, 5) + '...');
