@@ -26,9 +26,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 function buildAssistantPrompt(city, days, attractionsList) {
   return `
@@ -40,33 +38,31 @@ ${attractionsList}
 
 Твоя задача:
 
-1. Уточни у пользователя цель поездки:
-- Он путешествует один, с друзьями, с детьми?
-- Ему важно отдохнуть, активно провести время или всё понемногу?
-- Есть ли предпочтения: природа, музеи, кафе, пляжи, парки?
+1. Ответь кратко и живо: "Отлично, ${city} на ${days} дней! Чтобы лучше подобрать точки, скажи:"
+2. Уточни в одном абзаце:
+  - С кем он едет?
+  - Что важнее — отдых или активность?
+  - Предпочтения по местам (парки, природа, кафе, музеи...)
+3. Дождись ответа, и подбери 3–5 мест из списка выше, соответствующих описанию. Выведи список названий.
+4. Заверши фразой: "✅ Хочешь, я соберу маршрут из них?"
 
-2. После уточнения предложи 4–6 мест из списка выше, подходящих под его стиль.
-
-3. Дождись выбора пользователя (может выбрать всё, часть, или отказаться).
-
-4. Только после согласования — предложи: "Хочешь, я соберу маршрут?"
-
-5. Если пользователь ответит "да", верни JSON в формате:
+5. ✅ Если пользователь отвечает как-либо утвердительно (например, "да", "давай", "погнали", "поехали", "дерзай", "собери", "вперёд", "ок", "хочу", "давай уже", "готов", "го", "вжух", и т.п.) — считай это согласием и возвращай JSON.
+Если сомневается или отказывается — просто продолжи разговор.
 {
   "action": "create_trip",
   "params": {
     "city": "${city}",
     "days": ${days},
     "attractions": [
-      { "name": "Олимпийский парк" },
-      { "name": "Дендрарий" }
+      { "name": "Дендрарий" },
+      { "name": "Парк Ривьера" }
     ]
   },
-  "suggestions": ["+ Добавь пляжи", "+ Найди кафе", "+ Покажи карту маршрута"]
+  "suggestions": ["+ Добавь пляжи", "+ Найди кафе"]
 }
 
 ⚠️ Никогда не придумывай новые достопримечательности. Используй только список выше.
-⚠️ Никогда не добавляй ссылку — её сформирует backend.`;
+⚠️ Не добавляй ссылку на маршрут — backend сам её сформирует.`;
 }
 
 async function generateTripFromParams(user_id, params) {
@@ -124,10 +120,7 @@ async function generateTripFromParams(user_id, params) {
 
 app.post('/api/chat', async (req, res) => {
   const { user_id, message } = req.body;
-
-  if (!user_id || !message) {
-    return res.status(400).json({ error: 'Missing user_id or message' });
-  }
+  if (!user_id || !message) return res.status(400).json({ error: 'Missing user_id or message' });
 
   await supabase.from('chat_history').insert([{ user_id, role: 'user', message }]);
 
@@ -164,8 +157,6 @@ app.post('/api/chat', async (req, res) => {
       ...historyFiltered.map(h => ({ role: h.role, content: h.message }))
     ];
 
-    console.log('📤 Отправляем в GPT:', messages);
-
     const completion = await openai.chat.completions.create({
       model: 'gpt-4',
       messages,
@@ -173,8 +164,6 @@ app.post('/api/chat', async (req, res) => {
     });
 
     const rawResponse = completion.choices[0].message.content || 'Ошибка генерации';
-    console.log('📦 RAW GPT response:', rawResponse);
-
     let assistantMessage = rawResponse;
     let suggestions = [];
     let parsed = null;
@@ -195,11 +184,9 @@ app.post('/api/chat', async (req, res) => {
           assistantMessage = rawResponse.replace(jsonMatch[0], '').trim();
         }
       } else {
-        console.warn('❌ JSON не найден в ответе GPT');
         assistantMessage = rawResponse.trim();
       }
     } catch (e) {
-      console.log('❌ Не удалось распарсить JSON из ответа GPT');
       assistantMessage = rawResponse.trim();
     }
 
@@ -220,10 +207,7 @@ app.post('/api/chat', async (req, res) => {
 
 app.get('/api/chat-history', async (req, res) => {
   const { user_id } = req.query;
-
-  if (!user_id) {
-    return res.status(400).json({ error: 'Missing user_id' });
-  }
+  if (!user_id) return res.status(400).json({ error: 'Missing user_id' });
 
   try {
     const { data, error } = await supabase
@@ -235,7 +219,6 @@ app.get('/api/chat-history', async (req, res) => {
     if (error) throw error;
     res.status(200).json({ messages: data });
   } catch (err) {
-    console.error('Ошибка при получении истории чата:', err);
     res.status(500).json({ error: 'Ошибка при получении истории чата' });
   }
 });
