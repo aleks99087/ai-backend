@@ -8,7 +8,6 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Получаем абсолютный путь до .env
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, '.env') });
@@ -32,6 +31,59 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+async function generateTripFromParams(user_id, params) {
+  const { days = 3, city = 'Сочи', attractions = [] } = params;
+  const selected = attractions.length
+    ? attractions
+    : (await supabase.from('attractions').select('*').eq('city', city).order('rating', { ascending: false }).limit(6)).data || [];
+
+  if (!selected || selected.length === 0) return null;
+
+  const first = selected[0];
+  const { data: trip } = await supabase.from('trips').insert({
+    user_id,
+    title: `Путешествие в ${city}`,
+    description: `Маршрут по ${city} на ${days} дней`,
+    country: first.country,
+    photo_url: first.photos?.[0] || null,
+    location: first.city,
+    lat: first.latitude,
+    lng: first.longitude,
+    is_draft: true,
+    created_by_ai: true,
+    is_public: false,
+    budget: 20000,
+    start_date: new Date().toISOString().split('T')[0],
+    end_date: new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    likes: 0,
+    comments: 0,
+  }).select().single();
+
+  for (let i = 0; i < selected.length; i++) {
+    const item = selected[i];
+    const { data: point } = await supabase.from('points').insert({
+      trip_id: trip.id,
+      name: item.name,
+      description: item.description,
+      latitude: item.latitude,
+      longitude: item.longitude,
+      how_to_get: item.working_status || '',
+      impressions: item.description,
+      order: i
+    }).select().single();
+
+    const photos = item.photos || [];
+    for (const url of photos) {
+      await supabase.from('point_images').insert({ point_id: point.id, url });
+    }
+  }
+
+  return {
+    id: trip.id,
+    url: `https://injoy-ten.vercel.app/trips/${trip.id}`
+  };  
+}
+
 app.post('/api/chat', async (req, res) => {
   const { user_id, message } = req.body;
 
@@ -39,101 +91,32 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'Missing user_id or message' });
   }
 
+  await supabase.from('chat_history').insert([{ user_id, role: 'user', message }]);
+
   try {
     const { data: history } = await supabase
       .from('chat_history')
       .select('role, message')
       .eq('user_id', user_id)
-      .order('created_at', { ascending: true })
-      .limit(10);
+      .order('created_at', { ascending: true });
 
-    const historyFiltered = (history || []).filter(
-      (h) =>
-        h &&
-        h.message !== null &&
-        h.role !== null &&
-        typeof h.message === 'string' &&
-        ['user', 'assistant'].includes(h.role)
-    );
+    const historyFiltered = (history || [])
+      .filter(
+        (h) =>
+          h &&
+          h.message !== null &&
+          h.role !== null &&
+          typeof h.message === 'string' &&
+          ['user', 'assistant'].includes(h.role)
+      )
+      .slice(-10);
 
     const messages = [
-      {
-        role: 'system',
-        content: assistantPrompt
-      },
+      { role: 'system', content: assistantPrompt },
       ...historyFiltered.map((h) => ({ role: h.role, content: h.message })),
-      { role: 'user', content: message },
     ];
 
     console.log('📤 Отправляем в GPT:', messages);
-
-    const lastAssistantMessage = historyFiltered.filter(h => h.role === 'assistant').slice(-1)[0]?.message || '';
-    const isUserConfirmation = ['да', 'давай', 'ок', 'хорошо'].some(word =>
-      message.toLowerCase().includes(word)
-    );
-
-    if (isUserConfirmation && lastAssistantMessage.toLowerCase().includes('соберу маршрут')) {
-      console.log('🧭 Пользователь подтвердил создание маршрута. Генерируем...');
-
-      const { data: attractions, error: attrError } = await supabase
-        .from('attractions')
-        .select('*')
-        .order('rating', { ascending: false })
-        .limit(6);
-
-      if (attrError || !attractions || attractions.length === 0) {
-        return res.status(500).json({ error: 'Не удалось получить достопримечательности' });
-      }
-
-      const { data: trip, error: tripError } = await supabase
-        .from('trips')
-        .insert({
-          user_id,
-          title: 'Маршрут от AI',
-          country: attractions[0].country || 'Не указана',
-          photo_url: attractions[0].photos?.[0] || null,
-          is_draft: true,
-          likes: 0,
-          comments: 0
-        })
-        .select()
-        .single();
-
-      if (tripError || !trip?.id) {
-        return res.status(500).json({ error: 'Ошибка при создании маршрута' });
-      }
-
-      for (let i = 0; i < attractions.length; i++) {
-        const attr = attractions[i];
-
-        await supabase
-          .from('points')
-          .insert({
-            trip_id: trip.id,
-            name: attr.name,
-            latitude: attr.latitude,
-            longitude: attr.longitude,
-            how_to_get: attr.working_status || '',
-            impressions: attr.description || '',
-            order: i
-          });
-      }
-
-      const tripUrl = `https://injoy-ten.vercel.app/trips/${trip.id}`;
-
-      const reply = `Маршрут готов! Вот ссылка на него: ${tripUrl}
-
-    {
-      "suggestions": ["+ Измени маршрут", "+ Добавь отели", "+ Подскажи достопримечательности"]
-    }`;
-
-      await supabase.from('chat_history').insert([
-        { user_id, role: 'user', message },
-        { user_id, role: 'assistant', message: reply },
-      ]);
-
-      return res.status(200).json({ reply, suggestions: ["+ Измени маршрут", "+ Добавь отели", "+ Подскажи достопримечательности"] });
-    }
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4',
@@ -141,24 +124,47 @@ app.post('/api/chat', async (req, res) => {
       temperature: 0.8,
     });
 
+    console.log('🧠 Ответ GPT:', completion.choices[0].message);
+
     const rawResponse = completion.choices[0].message.content || 'Ошибка генерации';
+    console.log('📦 RAW GPT response:', rawResponse);
+
     let assistantMessage = rawResponse;
     let suggestions = [];
+    let parsed = null;
 
     try {
-      const jsonStart = rawResponse.lastIndexOf('{');
-      const jsonPart = rawResponse.slice(jsonStart);
-      const parsed = JSON.parse(jsonPart);
-      if (parsed.suggestions) suggestions = parsed.suggestions;
-      assistantMessage = rawResponse.slice(0, jsonStart).trim();
+      const jsonMatch = rawResponse.match(/\{[\s\S]*\}$/);
+      if (jsonMatch) {
+        parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.suggestions) suggestions = parsed.suggestions;
+
+        if (parsed.action === 'create_trip') {
+          const trip = await generateTripFromParams(user_id, parsed.params || {});
+          assistantMessage = `Готово! Вот ваш маршрут: ${trip.url}`;
+          suggestions = ["+ Измени маршрут", "+ Добавь отели", "+ Подскажи достопримечательности"];
+          res.status(200).json({ reply: assistantMessage, suggestions, tripId: trip.id });
+          return; // <— чтобы не падали ниже
+        } else {
+          assistantMessage = rawResponse.replace(jsonMatch[0], '').trim();
+        }        
+      } else {
+        console.warn('❌ JSON не найден в ответе GPT');
+        assistantMessage = rawResponse.trim();
+      }
     } catch (e) {
-      console.log('Не удалось выделить подсказки из ответа GPT');
+      console.log('❌ Не удалось распарсить JSON из ответа GPT');
+      console.log('📦 RAW GPT response:', rawResponse);
+      assistantMessage = rawResponse.trim();
     }
 
-    await supabase.from('chat_history').insert([
-      { user_id, role: 'user', message },
-      { user_id, role: 'assistant', message: assistantMessage },
-    ]);
+    await supabase.from('chat_history').insert({
+      user_id,
+      role: 'assistant',
+      message: assistantMessage,
+      raw_gpt_response: completion.choices[0].message,
+      message_type: parsed?.action ? 'action' : 'text'
+    });
 
     res.status(200).json({ reply: assistantMessage, suggestions });
   } catch (err) {
@@ -167,65 +173,25 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-app.post('/api/create-draft-route', async (req, res) => {
-  const { user_id } = req.body;
+app.get('/api/chat-history', async (req, res) => {
+  const { user_id } = req.query;
 
   if (!user_id) {
-    return res.status(400).json({ error: 'user_id is required' });
+    return res.status(400).json({ error: 'Missing user_id' });
   }
 
   try {
-    // 1. Получаем 6 топовых достопримечательностей
-    const { data: attractions, error: attrError } = await supabase
-      .from('attractions')
+    const { data, error } = await supabase
+      .from('chat_history')
       .select('*')
-      .order('rating', { ascending: false })
-      .limit(6);
+      .eq('user_id', user_id)
+      .order('created_at', { ascending: true });
 
-    if (attrError || !attractions || attractions.length === 0) {
-      throw new Error('Не удалось получить достопримечательности');
-    }
-
-    // 2. Создаем черновик маршрута
-    const { data: trip, error: tripError } = await supabase
-      .from('trips')
-      .insert({
-        user_id,
-        title: 'Маршрут от AI',
-        country: attractions[0].country || 'Не указана',
-        photo_url: attractions[0].photos?.[0] || null,
-        is_draft: true,
-        likes: 0,
-        comments: 0
-      })
-      .select()
-      .single();
-
-    if (tripError) {
-      throw new Error(`Ошибка при создании маршрута: ${tripError.message}`);
-    }
-
-    // 3. Добавляем точки маршрута
-    for (let i = 0; i < attractions.length; i++) {
-      const attr = attractions[i];
-
-      await supabase
-        .from('points')
-        .insert({
-          trip_id: trip.id,
-          name: attr.name,
-          latitude: attr.latitude,
-          longitude: attr.longitude,
-          how_to_get: attr.working_status || '',
-          impressions: attr.description || '',
-          order: i
-        });
-    }
-
-    return res.status(200).json({ trip_id: trip.id });
-  } catch (error) {
-    console.error('Ошибка при генерации маршрута:', error);
-    return res.status(500).json({ error: error.message || 'Ошибка сервера' });
+    if (error) throw error;
+    res.status(200).json({ messages: data });
+  } catch (err) {
+    console.error('Ошибка при получении истории чата:', err);
+    res.status(500).json({ error: 'Ошибка при получении истории чата' });
   }
 });
 
