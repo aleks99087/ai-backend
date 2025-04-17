@@ -67,6 +67,74 @@ app.post('/api/chat', async (req, res) => {
 
     console.log('📤 Отправляем в GPT:', messages);
 
+    const lastAssistantMessage = historyFiltered.filter(h => h.role === 'assistant').slice(-1)[0]?.message || '';
+    const isUserConfirmation = ['да', 'давай', 'ок', 'хорошо'].some(word =>
+      message.toLowerCase().includes(word)
+    );
+
+    if (isUserConfirmation && lastAssistantMessage.toLowerCase().includes('соберу маршрут')) {
+      console.log('🧭 Пользователь подтвердил создание маршрута. Генерируем...');
+
+      const { data: attractions, error: attrError } = await supabase
+        .from('attractions')
+        .select('*')
+        .order('rating', { ascending: false })
+        .limit(6);
+
+      if (attrError || !attractions || attractions.length === 0) {
+        return res.status(500).json({ error: 'Не удалось получить достопримечательности' });
+      }
+
+      const { data: trip, error: tripError } = await supabase
+        .from('trips')
+        .insert({
+          user_id,
+          title: 'Маршрут от AI',
+          country: attractions[0].country || 'Не указана',
+          photo_url: attractions[0].photos?.[0] || null,
+          is_draft: true,
+          likes: 0,
+          comments: 0
+        })
+        .select()
+        .single();
+
+      if (tripError || !trip?.id) {
+        return res.status(500).json({ error: 'Ошибка при создании маршрута' });
+      }
+
+      for (let i = 0; i < attractions.length; i++) {
+        const attr = attractions[i];
+
+        await supabase
+          .from('points')
+          .insert({
+            trip_id: trip.id,
+            name: attr.name,
+            latitude: attr.latitude,
+            longitude: attr.longitude,
+            how_to_get: attr.working_status || '',
+            impressions: attr.description || '',
+            order: i
+          });
+      }
+
+      const tripUrl = `https://injoy-ten.vercel.app/trips/${trip.id}`;
+
+      const reply = `Маршрут готов! Вот ссылка на него: ${tripUrl}
+
+    {
+      "suggestions": ["+ Измени маршрут", "+ Добавь отели", "+ Подскажи достопримечательности"]
+    }`;
+
+      await supabase.from('chat_history').insert([
+        { user_id, role: 'user', message },
+        { user_id, role: 'assistant', message: reply },
+      ]);
+
+      return res.status(200).json({ reply, suggestions: ["+ Измени маршрут", "+ Добавь отели", "+ Подскажи достопримечательности"] });
+    }
+
     const completion = await openai.chat.completions.create({
       model: 'gpt-4',
       messages,
