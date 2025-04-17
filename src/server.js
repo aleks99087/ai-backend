@@ -66,8 +66,7 @@ ${attractionsList}
 }
 
 ⚠️ Никогда не придумывай новые достопримечательности. Используй только список выше.
-⚠️ Никогда не добавляй ссылку — её сформирует backend.
-  `;
+⚠️ Никогда не добавляй ссылку — её сформирует backend.`;
 }
 
 async function generateTripFromParams(user_id, params) {
@@ -140,14 +139,7 @@ app.post('/api/chat', async (req, res) => {
       .order('created_at', { ascending: true });
 
     const historyFiltered = (history || [])
-      .filter(
-        (h) =>
-          h &&
-          h.message !== null &&
-          h.role !== null &&
-          typeof h.message === 'string' &&
-          ['user', 'assistant'].includes(h.role)
-      )
+      .filter(h => h?.message && h?.role && ['user', 'assistant'].includes(h.role))
       .slice(-10);
 
     const lastUserMessage = historyFiltered.reverse().find(h => h.role === 'user')?.message || '';
@@ -169,7 +161,7 @@ app.post('/api/chat', async (req, res) => {
 
     const messages = [
       { role: 'system', content: buildAssistantPrompt(city, days, attractionsList) },
-      ...historyFiltered.map((h) => ({ role: h.role, content: h.message })),
+      ...historyFiltered.map(h => ({ role: h.role, content: h.message }))
     ];
 
     console.log('📤 Отправляем в GPT:', messages);
@@ -224,4 +216,30 @@ app.post('/api/chat', async (req, res) => {
     console.error('AI error:', err);
     res.status(500).json({ error: 'Ошибка генерации' });
   }
+});
+
+app.get('/api/chat-history', async (req, res) => {
+  const { user_id } = req.query;
+
+  if (!user_id) {
+    return res.status(400).json({ error: 'Missing user_id' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('chat_history')
+      .select('*')
+      .eq('user_id', user_id)
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    res.status(200).json({ messages: data });
+  } catch (err) {
+    console.error('Ошибка при получении истории чата:', err);
+    res.status(500).json({ error: 'Ошибка при получении истории чата' });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`✅ Server running on http://localhost:${port}`);
 });
